@@ -21,6 +21,8 @@
   .row { display:flex; gap:12px; flex-wrap:wrap; }
   .row > div { flex:1 1 200px; }
   .drop { border:2px dashed #c7cdd4; border-radius:12px; padding:22px; text-align:center; color:var(--muted); cursor:pointer; background:#fafbfc; }
+  .pick { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 6px; }
+  .pick button { flex:1 1 140px; }
   .drop.over { border-color:var(--pri); background:#eef4ff; }
   .drop img { max-width:100%; max-height:320px; border-radius:8px; display:block; margin:10px auto 0; }
   button { font:inherit; padding:10px 16px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
@@ -54,10 +56,17 @@
   <div class="card">
     <h2><span class="step">1</span> 上传课表（PDF 或图片）</h2>
     <div class="drop" id="drop">
-      <div id="dropText">点击选择文件，或拖拽 / 粘贴截图到这里<br><span class="hint"><b>推荐：教务系统导出的 PDF 课表</b>，直接读取文字，100% 准确，不需要 API Key<br>也可以用截图或照片（需要第 3 步的 API Key）</span></div>
+      <div id="dropText">点击这里选择文件，或拖拽 / 粘贴截图到这里<br><span class="hint"><b>推荐：教务系统导出的 PDF 课表</b>，直接读取文字，100% 准确，不需要 API Key<br>也可以用截图或照片（需要第 3 步的 API Key）</span></div>
       <img id="preview" hidden alt="课表预览">
     </div>
-    <input type="file" id="file" accept="image/*,application/pdf,.pdf" hidden>
+    <div class="pick">
+      <button class="pri" id="pickPdf" type="button">选择 PDF 文件</button>
+      <button id="pickImg" type="button">选择图片 / 拍照</button>
+    </div>
+    <div class="hint">手机上：微信里收到的 PDF，先点右上角「…」→「用其他应用打开」或「保存到手机/文件」，再点「选择 PDF 文件」从「文件」里找。</div>
+    <input type="file" id="file" hidden>
+    <input type="file" id="filePdf" accept=".pdf,application/pdf" hidden>
+    <input type="file" id="fileImg" accept="image/*" hidden>
   </div>
 
   <div class="card">
@@ -545,7 +554,10 @@ if (typeof document !== "undefined") {
   }
   const drop = $("drop");
   drop.addEventListener("click", () => $("file").click());
-  $("file").addEventListener("change", e => { loadFile(e.target.files[0]); e.target.value = ""; });
+  for (const id of ["file", "filePdf", "fileImg"])
+    $(id).addEventListener("change", e => { loadFile(e.target.files[0]); e.target.value = ""; });
+  $("pickPdf").addEventListener("click", () => $("filePdf").click());
+  $("pickImg").addEventListener("click", () => $("fileImg").click());
   drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("over"));
   drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); loadFile(e.dataTransfer.files[0]); });
