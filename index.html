@@ -38,6 +38,7 @@
   th { background:#f1f3f5; font-weight:600; white-space:nowrap; }
   td input, td select { width:100%; padding:6px 8px; border:1px solid transparent; border-radius:6px; font:inherit; background:transparent; }
   td input:focus, td select:focus { border-color:var(--pri); background:#fff; outline:none; }
+  td.wd select { min-width:82px; padding-right:4px; }
   td.name input { min-width:140px; } td.weeks input { min-width:90px; } td.per input { min-width:70px; }
   .hint { font-size:13px; color:var(--muted); }
   a { color:var(--pri); }
@@ -89,7 +90,7 @@
     <div class="actions">
       <button class="pri" id="recognize" disabled>识别课表</button>
       <button id="addRow">手动加一行</button>
-      <span class="hint" id="model-hint">模型：glm-4v-flash</span>
+      <label style="margin:0;display:flex;align-items:center;gap:6px">模型 <select id="model" style="width:auto;padding:6px 8px"><option value="glm-4v-flash">GLM-4V-Flash（快）</option><option value="glm-4.1v-thinking-flash">GLM-4.1V-Thinking-Flash（慢一些，更准）</option></select></label>
     </div>
     <div class="msg" id="recMsg"></div>
     <div class="tbl">
@@ -340,7 +341,8 @@ if (typeof module !== "undefined") module.exports = { buildIcs, parseWeeks, pars
 if (typeof document !== "undefined") {
 (() => {
   const $ = id => document.getElementById(id);
-  const MODEL = "glm-4v-flash";
+  $("model").value = localStorage.getItem("tt_model") || "glm-4v-flash";
+  $("model").addEventListener("change", e => localStorage.setItem("tt_model", e.target.value));
   let imageDataUrl = null;
 
   $("periods").value = localStorage.getItem("tt_periods") || DEFAULT_PERIODS;
@@ -386,7 +388,7 @@ if (typeof document !== "undefined") {
     const tr = document.createElement("tr");
     const sel = WD_NAMES.slice(1).map((n, i) => `<option value="${i+1}" ${c.weekday == i+1 ? "selected" : ""}>${n}</option>`).join("");
     tr.innerHTML = `<td class="name"><input data-k="name" value="${att(c.name)}" placeholder="课程名"></td>
-      <td><select data-k="weekday">${sel}</select></td>
+      <td class="wd"><select data-k="weekday">${sel}</select></td>
       <td class="per"><input data-k="periods" value="${att(c.periods)}" placeholder="1-2"></td>
       <td class="per"><input data-k="time" value="${att(c.time)}" placeholder="08:00-09:40"></td>
       <td class="weeks"><input data-k="weeks" value="${att(c.weeks)}" placeholder="1-16"></td>
@@ -408,7 +410,7 @@ if (typeof document !== "undefined") {
     const resp = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
       method: "POST", signal,
       headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: MODEL, temperature: 0.1, stream: true, messages: [{ role: "user", content: [
+      body: JSON.stringify({ model: $("model").value, temperature: 0.1, stream: true, messages: [{ role: "user", content: [
         { type: "image_url", image_url: { url: imageDataUrl.split(",")[1] } },
         { type: "text", text: PROMPT } ] }] })
     });
@@ -421,7 +423,7 @@ if (typeof document !== "undefined") {
       throw new Error(`HTTP ${resp.status}：${msg}`);
     }
     const reader = resp.body.getReader(), dec = new TextDecoder();
-    let buf = "", text = "";
+    let buf = "", text = "", thought = 0;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -435,8 +437,9 @@ if (typeof document !== "undefined") {
         try {
           const j = JSON.parse(payload);
           if (j.error) throw new Error(j.error.message || "模型返回错误");
-          text += j.choices?.[0]?.delta?.content || "";
-          onProgress(text.length);
+          const dl = j.choices?.[0]?.delta || {};
+          text += dl.content || ""; thought += (dl.reasoning_content || "").length;
+          onProgress(text.length, thought);
         } catch (e) { if (e.message && !e.message.startsWith("Unexpected") && !e.message.includes("JSON")) throw e; }
       }
     }
@@ -449,18 +452,19 @@ if (typeof document !== "undefined") {
     if (!imageDataUrl) { setMsg("recMsg", "请先上传课表图片", "err"); return; }
     localStorage.setItem("tt_apikey", key);
     $("recognize").disabled = true;
-    const TIMEOUT = 120;
+    const TIMEOUT = $("model").value.includes("thinking") ? 240 : 120;
     const ctrl = new AbortController();
-    const t0 = Date.now(); let got = 0;
+    const t0 = Date.now(); let got = 0, think = 0;
     const render = () => {
       const sec = Math.round((Date.now() - t0) / 1000);
-      setMsg("recMsg", got ? `识别中… 已收到 ${got} 字（${sec} 秒）` : `正在上传并等待模型响应… ${sec} 秒（超过 ${TIMEOUT} 秒会自动停止）`, "warn");
+      setMsg("recMsg", got ? `识别中… 已收到 ${got} 字（${sec} 秒）` : think ? `模型思考中… ${sec} 秒` : `正在上传并等待模型响应… ${sec} 秒（超过 ${TIMEOUT} 秒会自动停止）`, "warn");
     };
     render();
     const tick = setInterval(render, 1000);
     const killer = setTimeout(() => ctrl.abort(), TIMEOUT * 1000);
     try {
-      const text = await callModel(key, n => { got = n; }, ctrl.signal);
+      let text = await callModel(key, (n, t) => { got = n; think = t; }, ctrl.signal);
+      text = text.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?answer>/g, "").replace(/<\|[^|]*\|>/g, "");
       if (!text.trim()) throw new Error("模型没有返回内容，请重试一次");
       let rows;
       try { rows = parseModelJson(text); }
