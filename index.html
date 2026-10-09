@@ -76,7 +76,7 @@
         <input type="number" id="alarm" value="15" min="0" step="5">
       </div>
     </div>
-    <details style="margin-top:10px">
+    <details id="periodsBox" style="margin-top:10px">
       <summary>上课时间表（每节课几点到几点，默认是常见作息，和你学校不同就改这里）</summary>
       <textarea id="periods" rows="13"></textarea>
       <div class="hint">每行：节次 开始 结束。如果课表图片上本来就印了具体时间，会优先用图片上的时间。</div>
@@ -329,7 +329,7 @@ function parseModelJson(text) {
     if (c.start && c.end) time = `${c.start}-${c.end}`;
     let wd = 1; try { wd = parseWeekday(c.weekday ?? 1); } catch (_) {}
     const weeks = r.weeks || (Array.isArray(c.weeks) ? c.weeks.join(",") : String(c.weeks || ""));
-    return { name: String(c.name || c.course || c.课程 || "").trim(), weekday: wd, periods, time, weeks,
+    return { name: String(c.name || c.course || c.课程 || "").replace(/[\s◇◆●○▲△■□★☆※#＊*]+$/u, "").trim(), weekday: wd, periods, time, weeks,
       location: r.location || c.location || "", teacher: r.teacher || c.teacher || "" };
   });
 }
@@ -350,19 +350,26 @@ const PROMPT = `这是一张中国大学课程表图片（可能是教务系统�
 const WD_CHAR = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7 };
 
 /** 读出 PDF 每个字的位置: [{ch, x, y, font, page}]，y 向下增大，页与页首尾相接 */
-async function pdfChars(pdfjsLib, data) {
-  const doc = await pdfjsLib.getDocument({ data, cMapUrl: "https://registry.npmmirror.com/pdfjs-dist/4.10.38/files/cmaps/", cMapPacked: true, standardFontDataUrl: "https://registry.npmmirror.com/pdfjs-dist/4.10.38/files/standard_fonts/", isEvalSupported: false }).promise;
+async function pdfChars(pdfjsLib, data, cMapUrl) {
+  const doc = await pdfjsLib.getDocument({ data, cMapUrl: cMapUrl || "https://registry.npmmirror.com/pdfjs-dist/4.10.38/files/cmaps/", cMapPacked: true, standardFontDataUrl: "https://registry.npmmirror.com/pdfjs-dist/4.10.38/files/standard_fonts/", isEvalSupported: false }).promise;
   const chars = []; let yOffset = 0;
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
     const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
+    const M = (m, n) => [m[0]*n[0]+m[2]*n[1], m[1]*n[0]+m[3]*n[1], m[0]*n[2]+m[2]*n[3], m[1]*n[2]+m[3]*n[3], m[0]*n[4]+m[2]*n[5]+m[4], m[1]*n[4]+m[3]*n[5]+m[5]];
     for (const it of tc.items) {
       if (!it.str || !it.str.trim()) continue;
-      const [a, b, , , e, f] = it.transform;
-      const size = Math.hypot(a, b) || it.height || 1;
-      const arr = [...it.str], cw = (it.width || size * arr.length) / arr.length;
-      arr.forEach((ch, i) => { if (ch.trim() || (i > 0 && i < arr.length - 1)) chars.push({ ch, x: e + cw * (i + 0.5), y: yOffset + (vp.height - f), size, font: it.fontName, page: p }); });
+      // 换到页面显示坐标（处理旋转页面）：x 向右, y 向下
+      const t = M(vp.transform, it.transform);
+      const size = Math.hypot(t[2], t[3]) || Math.hypot(t[0], t[1]) || 1;
+      const adv = Math.hypot(t[0], t[1]) || 1, dx = t[0] / adv, dy = t[1] / adv;
+      const scale = adv / (Math.hypot(it.transform[0], it.transform[1]) || 1);
+      const arr = [...it.str], cw = ((it.width || 0) * scale || size * arr.length) / arr.length;
+      arr.forEach((ch, i) => {
+        if (!ch.trim() && (i === 0 || i === arr.length - 1)) return;
+        chars.push({ ch, x: t[4] + dx * cw * (i + 0.5), y: yOffset + t[5] + dy * cw * (i + 0.5), size, font: it.fontName, page: p });
+      });
     }
     yOffset += vp.height + 10;
   }
@@ -498,13 +505,24 @@ if (typeof document !== "undefined") {
     $("recMsg").scrollIntoView({ behavior: "smooth", block: "center" });
     try {
       const lib = await getPdfjs();
-      const chars = await pdfChars(lib, new Uint8Array(await file.arrayBuffer()));
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let chars = await pdfChars(lib, buf.slice(), new URL("cmaps/", location.href).href).catch(() => []);
+      if (!chars.length) chars = await pdfChars(lib, buf.slice());  // 本站字体映射没加载到时，改用国内 npm 镜像
       const rows = parseModelJson(JSON.stringify({ courses: coursesFromPdfChars(chars) }));
       $("tbody").innerHTML = ""; rows.forEach(addRow);
-      setMsg("recMsg", `从 PDF 读取到 ${rows.length} 门课（不需要 API Key）。请核对一下下表，然后到第 4 步生成。`, "ok");
+      const w = periodWarning(rows);
+      setMsg("recMsg", `从 PDF 读取到 ${rows.length} 门课（不需要 API Key）。请核对一下下表，然后到第 4 步生成。` + w, w ? "warn" : "ok");
     } catch (e) {
       setMsg("recMsg", "PDF 读取失败：" + e.message, "err");
     }
+  }
+  function periodWarning(rows) {
+    let table = {}; try { table = parsePeriodsTable($("periods").value); } catch (_) {}
+    const need = new Set();
+    for (const r of rows) { if (r.time || !r.periods) continue; try { const [a, b] = parsePeriodRange(r.periods); for (let i = a; i <= b; i++) if (!table[i]) need.add(i); } catch (_) {} }
+    if (!need.size) return "";
+    $("periodsBox").open = true;
+    return `\n注意：课表用到了第 ${[...need].sort((a, b) => a - b).join("、")} 节，但上课时间表里没有。请在第 2 步展开的「上课时间表」里补上，并核对每节课的时间是否和你们学校一致。`;
   }
   function loadImage(file) {
     if (!file || !file.type.startsWith("image/")) return;
@@ -621,7 +639,8 @@ if (typeof document !== "undefined") {
       catch (e) { console.log("model raw output:", text); throw new Error("模型返回的内容无法解析，请再点一次「识别课表」。\n原始返回开头：" + text.slice(0, 200)); }
       if (!rows.length) throw new Error("没有识别到任何课程，请换一张更清晰的截图");
       $("tbody").innerHTML = ""; rows.forEach(addRow);
-      setMsg("recMsg", `识别到 ${rows.length} 门课（用时 ${Math.round((Date.now() - t0) / 1000)} 秒），请核对下表，尤其是周次和节次，有错直接改。`, "ok");
+      const w = periodWarning(rows);
+      setMsg("recMsg", `识别到 ${rows.length} 门课（用时 ${Math.round((Date.now() - t0) / 1000)} 秒），请核对下表，尤其是周次和节次，有错直接改。` + w, w ? "warn" : "ok");
     } catch (e) {
       const msg = e.name === "AbortError"
         ? `等了 ${TIMEOUT} 秒还没结果，已停止。可能是网络不稳或智谱服务繁忙：换个网络（Wi-Fi/流量切换）再点一次「识别课表」。`
