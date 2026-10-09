@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课表转日历 (.ics)</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --txt:#1f2328; --muted:#6b7280; --pri:#2563eb; --ok:#16a34a; --warn:#b45309; --err:#dc2626; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--txt); }
+  .wrap { max-width:860px; margin:0 auto; padding:16px; }
+  h1 { font-size:22px; margin:8px 0 4px; }
+  .sub { color:var(--muted); margin:0 0 16px; font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .card h2 { font-size:16px; margin:0 0 10px; display:flex; align-items:center; gap:8px; }
+  .step { display:inline-flex; width:22px; height:22px; border-radius:50%; background:var(--pri); color:#fff; font-size:13px; align-items:center; justify-content:center; }
+  label { display:block; font-size:13px; color:var(--muted); margin:8px 0 4px; }
+  input[type=text], input[type=password], input[type=date], input[type=number], textarea, select {
+    width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; }
+  textarea { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div { flex:1 1 200px; }
+  .drop { border:2px dashed #c7cdd4; border-radius:12px; padding:22px; text-align:center; color:var(--muted); cursor:pointer; background:#fafbfc; }
+  .drop.over { border-color:var(--pri); background:#eef4ff; }
+  .drop img { max-width:100%; max-height:320px; border-radius:8px; display:block; margin:10px auto 0; }
+  button { font:inherit; padding:10px 16px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.pri { background:var(--pri); color:#fff; border-color:var(--pri); }
+  button.ok { background:var(--ok); color:#fff; border-color:var(--ok); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.sm { padding:4px 8px; font-size:13px; }
+  .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; align-items:center; }
+  .msg { font-size:14px; margin-top:8px; white-space:pre-wrap; }
+  .msg.err { color:var(--err); } .msg.ok { color:var(--ok); } .msg.warn { color:var(--warn); }
+  details summary { cursor:pointer; color:var(--muted); font-size:14px; }
+  .tbl { overflow-x:auto; margin-top:8px; }
+  table { border-collapse:collapse; width:100%; min-width:720px; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:4px; text-align:left; vertical-align:top; }
+  th { background:#f1f3f5; font-weight:600; white-space:nowrap; }
+  td input, td select { width:100%; padding:6px 8px; border:1px solid transparent; border-radius:6px; font:inherit; background:transparent; }
+  td input:focus, td select:focus { border-color:var(--pri); background:#fff; outline:none; }
+  td.name input { min-width:140px; } td.weeks input { min-width:90px; } td.per input { min-width:70px; }
+  .hint { font-size:13px; color:var(--muted); }
+  a { color:var(--pri); }
+  .foot { color:var(--muted); font-size:12px; text-align:center; margin:20px 0; }
+  @media (max-width:600px) { .wrap{padding:10px} .card{padding:12px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>课表转日历</h1>
+  <p class="sub">上传课表截图，自动识别，生成 .ics 文件，导入手机日历（iPhone / 安卓 / 小米 / 华为均可）。所有数据只在你的浏览器里处理。</p>
+
+  <div class="card">
+    <h2><span class="step">1</span> 上传课表图片</h2>
+    <div class="drop" id="drop">
+      <div id="dropText">点击选择图片，或拖拽 / 粘贴截图到这里<br><span class="hint">教务系统截图、超级课程表截图、纸质课表拍照都可以</span></div>
+      <img id="preview" hidden alt="课表预览">
+    </div>
+    <input type="file" id="file" accept="image/*" hidden>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">2</span> 学期信息</h2>
+    <div class="row">
+      <div>
+        <label>第 1 周的周一日期（开学那周的周一）</label>
+        <input type="date" id="semStart">
+      </div>
+      <div>
+        <label>日历名称</label>
+        <input type="text" id="calName" placeholder="例如：2026 秋季课表">
+      </div>
+      <div>
+        <label>课前提醒（分钟，0 = 不提醒）</label>
+        <input type="number" id="alarm" value="15" min="0" step="5">
+      </div>
+    </div>
+    <details style="margin-top:10px">
+      <summary>上课时间表（每节课几点到几点，默认是常见作息，和你学校不同就改这里）</summary>
+      <textarea id="periods" rows="13"></textarea>
+      <div class="hint">每行：节次 开始 结束。如果课表图片上本来就印了具体时间，会优先用图片上的时间。</div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">3</span> 识别</h2>
+    <label>智谱 API Key（免费）<span class="hint"> · 没有的话 <a href="https://open.bigmodel.cn/usercenter/apikeys" target="_blank" rel="noopener">点这里注册领取</a>，手机号注册即可，GLM-4V-Flash 模型免费。Key 只保存在本机浏览器。</span></label>
+    <input type="password" id="apiKey" placeholder="粘贴你的 API Key，形如 xxxxxxxx.xxxxxxxx" autocomplete="off">
+    <div class="actions">
+      <button class="pri" id="recognize" disabled>识别课表</button>
+      <button id="addRow">手动加一行</button>
+      <span class="hint" id="model-hint">模型：glm-4v-flash</span>
+    </div>
+    <div class="msg" id="recMsg"></div>
+    <div class="tbl">
+      <table id="tbl">
+        <thead><tr><th>课程</th><th>星期</th><th>节次</th><th>或 时间</th><th>周次</th><th>地点</th><th>教师</th><th></th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="hint" style="margin-top:6px">节次写 <code>1-2</code>；时间写 <code>08:00-09:40</code>（填了时间就不看节次）；周次写 <code>1-16</code>、<code>1-8,10-16</code>、<code>2-16双</code>、<code>1-15单</code>。请核对一遍再生成。</div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">4</span> 生成并导入</h2>
+    <div class="actions">
+      <button class="ok" id="gen">生成 .ics 并下载</button>
+      <button id="copyIcs">复制 .ics 内容</button>
+    </div>
+    <div class="msg" id="genMsg"></div>
+    <details style="margin-top:10px">
+      <summary>怎么导入手机日历？</summary>
+      <div class="hint" style="margin-top:6px">
+        <b>iPhone</b>：用 Safari 打开本页下载，点"添加全部"即可；若在微信里打开，请先点右上角「在浏览器中打开」。<br>
+        <b>安卓</b>：下载后用文件管理器打开 .ics，选择「日历」导入；部分系统需要用 Google 日历或「ICS 导入」类 App。<br>
+        <b>电脑</b>：发到 iCloud / Outlook / Google 日历网页版「导入」，手机同步即可。<br>
+        建议导入到一个新建的日历（如「课表」），学期结束整个删掉很方便。
+      </div>
+    </details>
+  </div>
+  <div class="foot">识别由智谱 GLM-4V-Flash 完成，图片仅发送给智谱 API，本页面不保存任何数据。</div>
+</div>
+
+<script>
+/* ============ 纯逻辑部分（无 DOM 依赖，可单独测试） ============ */
+const DEFAULT_PERIODS = `1 08:00 08:45
+2 08:55 09:40
+3 10:00 10:45
+4 10:55 11:40
+5 14:00 14:45
+6 14:55 15:40
+7 16:00 16:45
+8 16:55 17:40
+9 19:00 19:45
+10 19:55 20:40
+11 20:50 21:35
+12 21:45 22:30`;
+
+const WEEKDAY_ALIASES = {"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"0":7,
+  "mon":1,"tue":2,"wed":3,"thu":4,"fri":5,"sat":6,"sun":7,
+  "一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"日":7,"天":7};
+
+function parseWeekday(v) {
+  if (typeof v === "number") return v === 0 ? 7 : v;
+  let s = String(v).trim().toLowerCase().replace(/^(星期|周)/, "");
+  if (s in WEEKDAY_ALIASES) return WEEKDAY_ALIASES[s];
+  throw new Error(`无法识别的星期: ${v}`);
+}
+
+function parsePeriodsTable(text) {
+  const map = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^(\d+)\s*[:：\s]\s*(\d{1,2}:\d{2})\s*[-~—\s]\s*(\d{1,2}:\d{2})/);
+    if (!m) throw new Error(`上课时间表这一行格式不对: "${line}"`);
+    map[m[1]] = [m[2].padStart(5, "0"), m[3].padStart(5, "0")];
+  }
+  return map;
+}
+
+function parseWeeks(spec, maxWeek = 25) {
+  if (Array.isArray(spec)) return [...new Set(spec.map(Number))].sort((a, b) => a - b);
+  let s = String(spec ?? "").trim().replace(/周/g, "").replace(/，/g, ",").replace(/\s/g, "");
+  let parity = null;
+  if (/(单|odd)$/i.test(s)) { parity = 1; s = s.replace(/(单|odd)$/i, ""); }
+  else if (/(双|even)$/i.test(s)) { parity = 0; s = s.replace(/(双|even)$/i, ""); }
+  if (!s || /^(all|全|每)$/.test(s)) s = `1-${maxWeek}`;
+  const weeks = new Set();
+  for (const part of s.split(",")) {
+    if (!part) continue;
+    const r = part.split(/[-~至]/);
+    if (r.length === 2) {
+      const a = parseInt(r[0], 10), b = parseInt(r[1], 10);
+      if (isNaN(a) || isNaN(b)) throw new Error(`周次格式不对: ${spec}`);
+      for (let w = a; w <= b; w++) weeks.add(w);
+    } else {
+      const n = parseInt(part, 10);
+      if (isNaN(n)) throw new Error(`周次格式不对: ${spec}`);
+      weeks.add(n);
+    }
+  }
+  let out = [...weeks];
+  if (parity !== null) out = out.filter(w => w % 2 === parity);
+  out.sort((a, b) => a - b);
+  if (!out.length) throw new Error(`周次为空: ${spec}`);
+  return out;
+}
+
+function parsePeriodRange(s) {
+  const m = String(s).trim().match(/^(\d+)\s*(?:[-~至—]\s*(\d+))?\s*节?$/);
+  if (!m) throw new Error(`节次格式不对: ${s}`);
+  const a = parseInt(m[1], 10), b = m[2] ? parseInt(m[2], 10) : a;
+  return [Math.min(a, b), Math.max(a, b)];
+}
+
+function parseTimeRange(s) {
+  const m = String(s).trim().match(/^(\d{1,2}:\d{2})\s*[-~—]\s*(\d{1,2}:\d{2})$/);
+  if (!m) throw new Error(`时间格式不对: ${s}（应为 08:00-09:40）`);
+  return [m[1].padStart(5, "0"), m[2].padStart(5, "0")];
+}
+
+function runs(weeks) {
+  const res = []; let i = 0;
+  while (i < weeks.length) {
+    if (i + 1 < weeks.length && [1, 2].includes(weeks[i + 1] - weeks[i])) {
+      const step = weeks[i + 1] - weeks[i]; let j = i + 1;
+      while (j + 1 < weeks.length && weeks[j + 1] - weeks[j] === step) j++;
+      res.push([weeks[i], step, j - i + 1]); i = j + 1;
+    } else { res.push([weeks[i], 1, 1]); i++; }
+  }
+  return res;
+}
+
+const esc = t => String(t).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+function fold(line) {
+  const enc = new TextEncoder(); const out = []; let cur = "", len = 0;
+  for (const ch of line) {
+    const b = enc.encode(ch).length;
+    if (len + b > 74) { out.push(cur); cur = " " + ch; len = 1 + b; } else { cur += ch; len += b; }
+  }
+  out.push(cur); return out.join("\r\n");
+}
+const pad = n => String(n).padStart(2, "0");
+function fmtLocal(d) { return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`; }
+function addDays(d, n) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() + n); return x; }
+function hashUid(s) { let h = 5381; for (const c of s) h = ((h << 5) + h + c.charCodeAt(0)) >>> 0; return h.toString(16); }
+
+/**
+ * courses: [{name, weekday, periods:"1-2" | time:"08:00-09:40", weeks:"1-16", location, teacher}]
+ * opts: {semesterStart:"2026-09-07", periods:{1:["08:00","08:45"]}, calName, alarm, tz}
+ */
+function buildIcs(courses, opts) {
+  const tz = opts.tz || "Asia/Shanghai";
+  const [y, m, d] = opts.semesterStart.split("-").map(Number);
+  let start = new Date(y, m - 1, d);
+  const warnings = [];
+  const dow = (start.getDay() + 6) % 7; // Monday=0
+  if (dow !== 0) { start = addDays(start, -dow); warnings.push(`开学日期不是周一，已按那一周的周一 ${start.getFullYear()}-${pad(start.getMonth()+1)}-${pad(start.getDate())} 计算`); }
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//timetable-to-ics//CN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+    `X-WR-CALNAME:${esc(opts.calName || "课表")}`, `X-WR-TIMEZONE:${tz}`,
+    "BEGIN:VTIMEZONE", `TZID:${tz}`, "BEGIN:STANDARD", "DTSTART:19700101T000000", "TZOFFSETFROM:+0800", "TZOFFSETTO:+0800", "TZNAME:CST", "END:STANDARD", "END:VTIMEZONE"];
+  let n = 0;
+  courses.forEach((c, idx) => {
+    const name = String(c.name || "").trim();
+    if (!name) throw new Error(`第 ${idx + 1} 行课程名为空`);
+    const wd = parseWeekday(c.weekday);
+    const weeks = parseWeeks(c.weeks || "all");
+    let t1, t2, label = "";
+    if (c.time && String(c.time).trim()) { [t1, t2] = parseTimeRange(c.time); }
+    else if (c.periods && String(c.periods).trim()) {
+      const [a, b] = parsePeriodRange(c.periods);
+      if (!opts.periods[a] || !opts.periods[b]) throw new Error(`「${name}」用到第 ${a}-${b} 节，但上课时间表里没有这几节的时间`);
+      t1 = opts.periods[a][0]; t2 = opts.periods[b][1]; label = a === b ? `第${a}节` : `第${a}-${b}节`;
+    } else throw new Error(`「${name}」缺少节次或时间`);
+    const [h1, m1] = t1.split(":").map(Number), [h2, m2] = t2.split(":").map(Number);
+    if (h2 * 60 + m2 <= h1 * 60 + m1) throw new Error(`「${name}」结束时间不晚于开始时间: ${t1}-${t2}`);
+    const desc = [];
+    if (c.teacher) desc.push(`教师: ${c.teacher}`);
+    if (label) desc.push(label);
+    desc.push(`周次: ${c.weeks || "全部"}`);
+    runs(weeks).forEach(([w0, step, count], ri) => {
+      const day = addDays(start, (w0 - 1) * 7 + (wd - 1));
+      const ds = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h1, m1);
+      const de = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h2, m2);
+      const ev = ["BEGIN:VEVENT", `UID:${hashUid(`${opts.semesterStart}|${name}|${wd}|${t1}|${w0}|${ri}`)}-${idx}-${ri}@timetable-ics`,
+        `DTSTAMP:${stamp}`, `DTSTART;TZID=${tz}:${fmtLocal(ds)}`, `DTEND;TZID=${tz}:${fmtLocal(de)}`, `SUMMARY:${esc(name)}`];
+      if (c.location) ev.push(`LOCATION:${esc(c.location)}`);
+      ev.push(`DESCRIPTION:${desc.map(esc).join("\\n")}`);
+      if (count > 1) ev.push(`RRULE:FREQ=WEEKLY;INTERVAL=${step};COUNT=${count}`);
+      if (opts.alarm > 0) ev.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${esc(name)}`, `TRIGGER:-PT${opts.alarm}M`, "END:VALARM");
+      ev.push("END:VEVENT"); lines.push(...ev); n++;
+    });
+  });
+  lines.push("END:VCALENDAR");
+  return { ics: lines.map(fold).join("\r\n") + "\r\n", events: n, warnings };
+}
+
+/** 从模型返回文本里抠出 JSON 并规范化为表格行 */
+function parseModelJson(text) {
+  let s = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const a = s.indexOf("{"), b = s.lastIndexOf("}");
+  if (a < 0 || b < 0) throw new Error("模型没有返回 JSON，原文：" + text.slice(0, 200));
+  const obj = JSON.parse(s.slice(a, b + 1));
+  const list = Array.isArray(obj) ? obj : (obj.courses || []);
+  return list.map(c => {
+    let periods = "", time = "";
+    if (Array.isArray(c.periods) && c.periods.length) periods = c.periods.length > 1 ? `${c.periods[0]}-${c.periods[c.periods.length-1]}` : String(c.periods[0]);
+    else if (typeof c.periods === "string") periods = c.periods;
+    if (c.start && c.end) time = `${c.start}-${c.end}`;
+    return { name: c.name || "", weekday: parseWeekday(c.weekday ?? 1), periods, time,
+      weeks: Array.isArray(c.weeks) ? c.weeks.join(",") : String(c.weeks || ""), location: c.location || "", teacher: c.teacher || "" };
+  });
+}
+
+const PROMPT = `这是一张中国大学课程表的图片。请把图中每一门课提取为 JSON，只输出 JSON，不要任何解释。
+格式：
+{"courses":[{"name":"课程名","weekday":1,"periods":[1,2],"weeks":"1-16","location":"教室","teacher":"教师"}]}
+规则：
+- weekday：1=周一 … 7=周日，按课程所在列的表头判断。
+- periods：课程占据的节次，按所在行的表头判断，连续节次写成列表，如第3-4节 → [3,4]；若图上只有具体时间没有节次，改用 "start":"08:00","end":"09:40"。
+- weeks：周次原文规范化，例如 "1-16"、"1-8,10-16"、"2-16双"、"1-15单"；图上没写周次就填 "1-16"。
+- 同一格里若有多门课（不同周次或不同老师），拆成多条。
+- location 是教室/地点，teacher 是教师，没有就填空字符串。
+- 不要遗漏任何一格，不要编造图上没有的课。`;
+
+if (typeof module !== "undefined") module.exports = { buildIcs, parseWeeks, parsePeriodsTable, parseModelJson, runs, parseWeekday };
+
+/* ============ 页面交互部分 ============ */
+if (typeof document !== "undefined") {
+(() => {
+  const $ = id => document.getElementById(id);
+  const MODEL = "glm-4v-flash";
+  let imageDataUrl = null;
+
+  $("periods").value = localStorage.getItem("tt_periods") || DEFAULT_PERIODS;
+  $("apiKey").value = localStorage.getItem("tt_apikey") || "";
+  $("semStart").value = localStorage.getItem("tt_semstart") || "";
+  $("calName").value = localStorage.getItem("tt_calname") || "";
+  $("periods").addEventListener("change", e => localStorage.setItem("tt_periods", e.target.value));
+  $("apiKey").addEventListener("change", e => localStorage.setItem("tt_apikey", e.target.value.trim()));
+  $("semStart").addEventListener("change", e => localStorage.setItem("tt_semstart", e.target.value));
+  $("calName").addEventListener("change", e => localStorage.setItem("tt_calname", e.target.value));
+
+  const setMsg = (id, text, cls = "") => { const el = $(id); el.textContent = text; el.className = "msg " + cls; };
+
+  function loadImage(file) {
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 1800, scale = Math.min(1, MAX / Math.max(img.width, img.height));
+        const cv = document.createElement("canvas");
+        cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
+        cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+        imageDataUrl = cv.toDataURL("image/jpeg", 0.9);
+        $("preview").src = imageDataUrl; $("preview").hidden = false;
+        $("dropText").textContent = "已选择图片，点击可更换";
+        $("recognize").disabled = false;
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+  const drop = $("drop");
+  drop.addEventListener("click", () => $("file").click());
+  $("file").addEventListener("change", e => loadImage(e.target.files[0]));
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); loadImage(e.dataTransfer.files[0]); });
+  document.addEventListener("paste", e => { for (const it of e.clipboardData.items) if (it.type.startsWith("image/")) { loadImage(it.getAsFile()); break; } });
+
+  const WD_NAMES = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  function addRow(c = {}) {
+    const tr = document.createElement("tr");
+    const sel = WD_NAMES.slice(1).map((n, i) => `<option value="${i+1}" ${c.weekday == i+1 ? "selected" : ""}>${n}</option>`).join("");
+    tr.innerHTML = `<td class="name"><input data-k="name" value="${att(c.name)}" placeholder="课程名"></td>
+      <td><select data-k="weekday">${sel}</select></td>
+      <td class="per"><input data-k="periods" value="${att(c.periods)}" placeholder="1-2"></td>
+      <td class="per"><input data-k="time" value="${att(c.time)}" placeholder="08:00-09:40"></td>
+      <td class="weeks"><input data-k="weeks" value="${att(c.weeks)}" placeholder="1-16"></td>
+      <td><input data-k="location" value="${att(c.location)}" placeholder="地点"></td>
+      <td><input data-k="teacher" value="${att(c.teacher)}" placeholder="教师"></td>
+      <td><button class="sm" title="删除">✕</button></td>`;
+    tr.querySelector("button").addEventListener("click", () => tr.remove());
+    $("tbody").appendChild(tr);
+  }
+  const att = v => String(v ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  function readRows() {
+    return [...$("tbody").querySelectorAll("tr")].map(tr => {
+      const o = {}; tr.querySelectorAll("[data-k]").forEach(el => o[el.dataset.k] = el.value.trim()); return o;
+    });
+  }
+  $("addRow").addEventListener("click", () => addRow());
+
+  $("recognize").addEventListener("click", async () => {
+    const key = $("apiKey").value.trim();
+    if (!key) { setMsg("recMsg", "请先填写智谱 API Key", "err"); $("apiKey").focus(); return; }
+    if (!imageDataUrl) { setMsg("recMsg", "请先上传课表图片", "err"); return; }
+    localStorage.setItem("tt_apikey", key);
+    $("recognize").disabled = true; setMsg("recMsg", "识别中，一般需要 10-30 秒…", "warn");
+    try {
+      const resp = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
+        method: "POST", headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: MODEL, temperature: 0.1, messages: [{ role: "user", content: [
+          { type: "image_url", image_url: { url: imageDataUrl.split(",")[1] } },
+          { type: "text", text: PROMPT } ] }] })
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error((data.error && (data.error.message || data.error.code)) || `HTTP ${resp.status}`);
+      const text = data.choices?.[0]?.message?.content ?? "";
+      const rows = parseModelJson(text);
+      if (!rows.length) throw new Error("没有识别到任何课程，请换一张更清晰的截图");
+      $("tbody").innerHTML = ""; rows.forEach(addRow);
+      setMsg("recMsg", `识别到 ${rows.length} 门课，请核对下表（尤其是周次和节次），有错直接改。`, "ok");
+    } catch (e) {
+      setMsg("recMsg", "识别失败：" + e.message, "err");
+    } finally { $("recognize").disabled = false; }
+  });
+
+  function generate() {
+    const rows = readRows();
+    if (!rows.length) throw new Error("表格是空的，请先识别或手动添加课程");
+    if (!$("semStart").value) { $("semStart").focus(); throw new Error("请填写第 1 周周一的日期"); }
+    const periods = parsePeriodsTable($("periods").value);
+    return buildIcs(rows, { semesterStart: $("semStart").value, periods, calName: $("calName").value || "课表", alarm: parseInt($("alarm").value, 10) || 0 });
+  }
+  $("gen").addEventListener("click", () => {
+    try {
+      const { ics, events, warnings } = generate();
+      const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+      a.download = ($("calName").value || "课表").replace(/[\\/:*?"<>|]/g, "_") + ".ics"; document.body.appendChild(a); a.click(); a.remove();
+      setMsg("genMsg", `已生成 ${events} 个日历事件（含每周重复）。${warnings.join("；")}\n如果没有自动下载，用「复制 .ics 内容」粘贴到记事本另存为 .ics。`, "ok");
+    } catch (e) { setMsg("genMsg", e.message, "err"); }
+  });
+  $("copyIcs").addEventListener("click", async () => {
+    try { const { ics } = generate(); await navigator.clipboard.writeText(ics); setMsg("genMsg", "已复制到剪贴板", "ok"); }
+    catch (e) { setMsg("genMsg", e.message, "err"); }
+  });
+})();
+}
+</script>
+</body>
+</html>
