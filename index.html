@@ -52,12 +52,12 @@
   <p class="sub">上传课表截图，自动识别，生成 .ics 文件，导入手机日历（iPhone / 安卓 / 小米 / 华为均可）。所有数据只在你的浏览器里处理。</p>
 
   <div class="card">
-    <h2><span class="step">1</span> 上传课表图片</h2>
+    <h2><span class="step">1</span> 上传课表（PDF 或图片）</h2>
     <div class="drop" id="drop">
-      <div id="dropText">点击选择图片，或拖拽 / 粘贴截图到这里<br><span class="hint">教务系统截图、超级课程表截图、纸质课表拍照都可以</span></div>
+      <div id="dropText">点击选择文件，或拖拽 / 粘贴截图到这里<br><span class="hint"><b>推荐：教务系统导出的 PDF 课表</b>，直接读取文字，100% 准确，不需要 API Key<br>也可以用截图或照片（需要第 3 步的 API Key）</span></div>
       <img id="preview" hidden alt="课表预览">
     </div>
-    <input type="file" id="file" accept="image/*" hidden>
+    <input type="file" id="file" accept="image/*,application/pdf,.pdf" hidden>
   </div>
 
   <div class="card">
@@ -85,6 +85,7 @@
 
   <div class="card">
     <h2><span class="step">3</span> 识别</h2>
+    <div class="hint" id="pdfNote" style="margin-bottom:6px">上传 PDF 的话会自动读取，可以跳过 API Key，直接核对下面的表格。</div>
     <label>智谱 API Key（免费）<span class="hint"> · 没有的话 <a href="https://open.bigmodel.cn/usercenter/apikeys" target="_blank" rel="noopener">点这里注册领取</a>，手机号注册即可，GLM-4V-Flash 模型免费。Key 只保存在本机浏览器。</span></label>
     <input type="password" id="apiKey" placeholder="粘贴你的 API Key，形如 xxxxxxxx.xxxxxxxx" autocomplete="off">
     <div class="actions">
@@ -345,7 +346,107 @@ const PROMPT = `这是一张中国大学课程表图片（可能是教务系统�
 - 不要遗漏，不要编造图上没有的课。
 `;
 
-if (typeof module !== "undefined") module.exports = { buildIcs, parseWeeks, parsePeriodsTable, parseModelJson, runs, parseWeekday, extractCourses };
+/* ===== PDF 课表解析（正方等教务系统导出的文字版 PDF） ===== */
+const WD_CHAR = { "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7 };
+
+/** 读出 PDF 每个字的位置: [{ch, x, y, font, page}]，y 向下增大，页与页首尾相接 */
+async function pdfChars(pdfjsLib, data) {
+  const doc = await pdfjsLib.getDocument({ data, cMapUrl: "https://registry.npmmirror.com/pdfjs-dist/4.10.38/files/cmaps/", cMapPacked: true, standardFontDataUrl: "https://registry.npmmirror.com/pdfjs-dist/4.10.38/files/standard_fonts/", isEvalSupported: false }).promise;
+  const chars = []; let yOffset = 0;
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const vp = page.getViewport({ scale: 1 });
+    const tc = await page.getTextContent();
+    for (const it of tc.items) {
+      if (!it.str || !it.str.trim()) continue;
+      const [a, b, , , e, f] = it.transform;
+      const size = Math.hypot(a, b) || it.height || 1;
+      const arr = [...it.str], cw = (it.width || size * arr.length) / arr.length;
+      arr.forEach((ch, i) => { if (ch.trim() || (i > 0 && i < arr.length - 1)) chars.push({ ch, x: e + cw * (i + 0.5), y: yOffset + (vp.height - f), size, font: it.fontName, page: p }); });
+    }
+    yOffset += vp.height + 10;
+  }
+  return chars;
+}
+
+/** 把字按行拼起来: 返回 [{y, chars:[...], text}] 按 y 排序 */
+function toLines(chars) {
+  const sorted = [...chars].sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines = [];
+  for (const c of sorted) {
+    const tol = c.size * 0.45;
+    let ln = lines.length && Math.abs(lines[lines.length - 1].y - c.y) <= tol ? lines[lines.length - 1] : null;
+    if (!ln) { ln = { y: c.y, chars: [] }; lines.push(ln); }
+    ln.chars.push(c);
+  }
+  for (const ln of lines) { ln.chars.sort((a, b) => a.x - b.x); ln.text = ln.chars.map(c => c.ch).join(""); }
+  return lines;
+}
+
+/** 字 → 课程列表 [{name, weekday, raw}] */
+function coursesFromPdfChars(chars) {
+  if (!chars.length) throw new Error("这个 PDF 里没有文字（可能是扫描件或图片），请改用截图识别。");
+  // 1. 找星期表头
+  const lines = toLines(chars);
+  let header = null;
+  for (const ln of lines) {
+    const hits = [];
+    const re = /(?:星期|周)([一二三四五六日天])/g; let m;
+    while ((m = re.exec(ln.text))) {
+      const cs = ln.chars.slice(m.index, m.index + m[0].length);
+      hits.push({ wd: WD_CHAR[m[1]], x: cs.reduce((s, c) => s + c.x, 0) / cs.length });
+    }
+    if (hits.length >= 5) { header = { y: ln.y, hits }; break; }
+  }
+  if (!header) throw new Error("PDF 里没找到「星期一 … 星期日」表头，暂不支持这种格式，请改用截图识别。");
+  const cols = header.hits.sort((a, b) => a.x - b.x);
+  const gap = (cols[cols.length - 1].x - cols[0].x) / (cols.length - 1);
+  const bounds = cols.map((c, i) => ({
+    wd: c.wd,
+    left: i ? (cols[i - 1].x + c.x) / 2 : c.x - gap / 2,
+    right: i < cols.length - 1 ? (c.x + cols[i + 1].x) / 2 : c.x + gap / 2,
+  }));
+  // 2. 表头以下的字分到各列
+  const byCol = new Map(bounds.map(b => [b.wd, []]));
+  for (const c of chars) {
+    if (c.y <= header.y + c.size * 0.5) continue;
+    const b = bounds.find(b => c.x >= b.left && c.x < b.right);
+    if (b) byCol.get(b.wd).push(c);
+  }
+  // 3. 每列拼成一串，按「(x-y节)」切块
+  const fontCount = {}; for (const arr of byCol.values()) for (const c of arr) fontCount[c.font] = (fontCount[c.font] || 0) + 1;
+  const bodyFont = Object.entries(fontCount).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const courses = [];
+  for (const [wd, arr] of byCol) {
+    if (!arr.length) continue;
+    const stream = toLines(arr).flatMap(ln => ln.chars);
+    const text = stream.map(c => c.ch).join("");
+    const anchors = []; const re = /[(（]\s*第?\d+(?:\s*[-~]\s*\d+)?\s*节\s*[)）]/g; let m;
+    while ((m = re.exec(text))) anchors.push(m.index);
+    anchors.forEach((pos, k) => {
+      const prevEnd = k ? anchors[k - 1] : 0;
+      // 课程名: 优先按字体（加粗）往前找; 字体分不出来就取上一块「学分:x.x」之后的文字
+      let s = pos;
+      while (s > prevEnd && stream[s - 1].font !== bodyFont) s--;
+      if (s === pos) {
+        const before = text.slice(prevEnd, pos);
+        const mm = [...before.matchAll(/学分\s*[:：]\s*\d+(?:\.\d+)?/g)].pop();
+        s = mm ? prevEnd + mm.index + mm[0].length : prevEnd;
+        if (!k) s = 0;
+      }
+      const name = text.slice(s, pos).replace(/^[\s/;；,，]+|[\s/;；,，]+$/g, "");
+      const nextStart = k + 1 < anchors.length ? anchors[k + 1] : text.length;
+      let end = nextStart;
+      if (k + 1 < anchors.length) { let e = nextStart; while (e > pos && stream[e - 1].font !== bodyFont) e--; end = e < nextStart ? e : nextStart; }
+      const raw = text.slice(pos, end);
+      if (name) courses.push({ name, weekday: wd, raw });
+    });
+  }
+  if (!courses.length) throw new Error("PDF 里找到了表头，但没认出「(1-2节)」这种课程信息，暂不支持这种格式，请改用截图识别。");
+  return courses;
+}
+
+if (typeof module !== "undefined") module.exports = { coursesFromPdfChars, pdfChars, buildIcs, parseWeeks, parsePeriodsTable, parseModelJson, runs, parseWeekday, extractCourses };
 
 /* ============ 页面交互部分 ============ */
 if (typeof document !== "undefined") {
@@ -366,6 +467,45 @@ if (typeof document !== "undefined") {
 
   const setMsg = (id, text, cls = "") => { const el = $(id); el.textContent = text; el.className = "msg " + cls; };
 
+  const isPdf = f => f && (f.type === "application/pdf" || /\.pdf$/i.test(f.name || ""));
+  function loadFile(file) {
+    if (!file) return;
+    if (isPdf(file)) return loadPdf(file);
+    if (!file.type.startsWith("image/")) { setMsg("recMsg", "只支持 PDF 或图片文件", "err"); return; }
+    loadImage(file);
+  }
+  let pdfjsPromise = null;
+  function getPdfjs() {
+    if (!pdfjsPromise) pdfjsPromise = (async () => {
+      const tries = [new URL("pdf.min.mjs", location.href).href, "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.min.mjs"];
+      let lastErr;
+      for (const url of tries) {
+        try {
+          const lib = await import(url);
+          lib.GlobalWorkerOptions.workerSrc = url.replace("pdf.min.mjs", "pdf.worker.min.mjs");
+          return lib;
+        } catch (e) { lastErr = e; }
+      }
+      pdfjsPromise = null;
+      throw new Error("PDF 读取组件加载失败（" + (lastErr && lastErr.message) + "），请检查网络后重试。");
+    })();
+    return pdfjsPromise;
+  }
+  async function loadPdf(file) {
+    $("preview").hidden = true; imageDataUrl = null;
+    $("dropText").innerHTML = `已选择 PDF：<b>${att(file.name)}</b>，点击可更换`;
+    setMsg("recMsg", "正在读取 PDF…", "warn");
+    $("recMsg").scrollIntoView({ behavior: "smooth", block: "center" });
+    try {
+      const lib = await getPdfjs();
+      const chars = await pdfChars(lib, new Uint8Array(await file.arrayBuffer()));
+      const rows = parseModelJson(JSON.stringify({ courses: coursesFromPdfChars(chars) }));
+      $("tbody").innerHTML = ""; rows.forEach(addRow);
+      setMsg("recMsg", `从 PDF 读取到 ${rows.length} 门课（不需要 API Key）。请核对一下下表，然后到第 4 步生成。`, "ok");
+    } catch (e) {
+      setMsg("recMsg", "PDF 读取失败：" + e.message, "err");
+    }
+  }
   function loadImage(file) {
     if (!file || !file.type.startsWith("image/")) return;
     const reader = new FileReader();
@@ -377,7 +517,7 @@ if (typeof document !== "undefined") {
         cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
         cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
         imageDataUrl = cv.toDataURL("image/jpeg", 0.9);
-        $("preview").src = imageDataUrl; $("preview").hidden = false;
+        $("preview").src = imageDataUrl; $("preview").hidden = false; setMsg("recMsg", "");
         $("dropText").textContent = "已选择图片，点击可更换";
         $("recognize").disabled = false;
       };
@@ -387,10 +527,10 @@ if (typeof document !== "undefined") {
   }
   const drop = $("drop");
   drop.addEventListener("click", () => $("file").click());
-  $("file").addEventListener("change", e => loadImage(e.target.files[0]));
+  $("file").addEventListener("change", e => { loadFile(e.target.files[0]); e.target.value = ""; });
   drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); loadImage(e.dataTransfer.files[0]); });
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); loadFile(e.dataTransfer.files[0]); });
   document.addEventListener("paste", e => { for (const it of e.clipboardData.items) if (it.type.startsWith("image/")) { loadImage(it.getAsFile()); break; } });
 
   const WD_NAMES = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"];
